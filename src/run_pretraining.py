@@ -181,12 +181,60 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     if mode == tf.estimator.ModeKeys.TRAIN:
       train_op = optimization.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+      global_step = tf.train.get_global_step()
+      def host_call_fn(global_step, loss):
+        global_step = tf.reduce_mean(global_step)
+      # compute accuracies
+      masked_lm_log_probs = tf.reshape(masked_lm_log_probs,
+                                       [-1, masked_lm_log_probs.shape[-1]])
+      masked_lm_predictions = tf.argmax(
+        masked_lm_log_probs, axis=-1, output_type=tf.int32)
+      masked_lm_example_loss = tf.reshape(masked_lm_example_loss, [-1])
+      masked_lm_ids = tf.reshape(masked_lm_ids, [-1])
+      masked_lm_weights = tf.reshape(masked_lm_weights, [-1])
+      masked_lm_accuracy = tf.metrics.accuracy(
+        labels=masked_lm_ids,
+        predictions=masked_lm_predictions,
+        weights=masked_lm_weights)
+      masked_lm_mean_loss = tf.metrics.mean(
+        values=masked_lm_example_loss, weights=masked_lm_weights)
+      next_sentence_log_probs = tf.reshape(
+        next_sentence_log_probs, [-1, next_sentence_log_probs.shape[-1]])
+      next_sentence_predictions = tf.argmax(
+        next_sentence_log_probs, axis=-1, output_type=tf.int32)
+      next_sentence_labels = tf.reshape(next_sentence_labels, [-1])
+      next_sentence_accuracy = tf.metrics.accuracy(
+        labels=next_sentence_labels, predictions=next_sentence_predictions)
+      next_sentence_mean_loss = tf.metrics.mean(
+        values=next_sentence_example_loss)
+
+      def host_call_fn(global_step, total_loss, masked_lm_loss, next_sentence_loss, masked_lm_accuracy, next_sentence_accuracy):
+        global_step = tf.reduce_mean(global_step)
+        with (tf.contrib.summary.create_file_writer(FLAGS.output_dir).as_default()):
+          with tf.contrib.summary.always_record_summaries():
+            tf.contrib.summary.scalar('total_loss', tf.reduce_mean(total_loss), step=global_step)
+            tf.contrib.summary.scalar('masked_lm_loss', masked_lm_loss, step=global_step)
+            tf.contrib.summary.scalar('next_sentence_loss', next_sentence_loss, step=global_step)
+            tf.contrib.summary.scalar('masked_lm_accuracy', masked_lm_accuracy, step=global_step)
+            tf.contrib.summary.scalar('next_sentence_accuracy', next_sentence_accuracy, step=global_step)
+
+            return tf.contrib.summary.all_summary_ops()
+      global_step_t = tf.reshape(global_step, [1])
+      total_loss_t = tf.reshape(total_loss, [1])
+      masked_lm_loss_t = masked_lm_mean_loss
+      next_sentence_loss_t = next_sentence_mean_loss
+      masked_lm_accuracy_t = masked_lm_accuracy
+      next_sentence_accuracy_t = next_sentence_accuracy
+
+      host_call = (host_call_fn, [global_step_t, total_loss_t, masked_lm_loss_t, next_sentence_loss_t, masked_lm_accuracy_t, next_sentence_accuracy_t])
 
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
           train_op=train_op,
-          scaffold_fn=scaffold_fn)
+          scaffold_fn=scaffold_fn,
+          host_call=host_call
+      )
     elif mode == tf.estimator.ModeKeys.EVAL:
 
       def metric_fn(masked_lm_example_loss, masked_lm_log_probs, masked_lm_ids,
